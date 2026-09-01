@@ -168,6 +168,34 @@ document.addEventListener('DOMContentLoaded', function() {
   importBtn.addEventListener('click', () => importFile.click());
   importFile.addEventListener('change', importConfigs);
   
+  // ---- 标签页通信：先确保 content script 已注入，再发消息 ----
+  function getActiveTab(callback) {
+    chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
+      const tab = tabs && tabs[0];
+      if (!tab || !tab.id || !/^https?:\/\//i.test(tab.url || '')) {
+        showStatus(t('openWebpageFirst'), 'error');
+        return;
+      }
+      callback(tab);
+    });
+  }
+
+  // 扩展刚重载 / 页面在扩展安装前就打开时，content script 可能不在，
+  // 先让 background 补注入再发消息，避免「点了没反应」
+  function sendToTab(tab, message, onDone) {
+    chrome.runtime.sendMessage({ action: 'ensureInjected', tabId: tab.id, url: tab.url }, function() {
+      void chrome.runtime.lastError;
+      chrome.tabs.sendMessage(tab.id, message, function() {
+        const err = chrome.runtime.lastError;
+        if (err) {
+          showStatus(t('pageNotReady'), 'error');
+          return;
+        }
+        if (onDone) onDone();
+      });
+    });
+  }
+
   function updateTriggerTabs() {
     triggerTabs.forEach(tab => {
       tab.classList.toggle('active', tab.dataset.trigger === triggerType);
@@ -201,101 +229,118 @@ document.addEventListener('DOMContentLoaded', function() {
       id: id,
       type: 'click',
       elementData: stepData?.elementData || null,
-      delay: stepData?.delay || 1000,
-      count: stepData?.count || 1,
-      interval: stepData?.interval || 200,
-      order: stepData?.order || steps.length + 1
+      delay: stepData?.delay ?? 1000,
+      count: stepData?.count ?? 1,
+      interval: stepData?.interval ?? 200,
+      order: steps.length + 1
     });
     renderSteps();
   }
-  
+
   function removeStep(id) {
-    steps = steps.filter(s => s.id !== id);
+    steps = steps.filter(s => String(s.id) !== String(id));
     steps.forEach((s, i) => s.order = i + 1);
     renderSteps();
     saveDraft();
   }
-  
+
+  function findStep(id) {
+    return steps.find(s => String(s.id) === String(id));
+  }
+
+  // 元素摘要：图标按钮没有文字，光显示 tagName 看不出选中了什么
+  function describeElement(data) {
+    if (!data) return '';
+    const parts = [data.tagName ? data.tagName.toLowerCase() : '?'];
+    const text = (data.textContent || '').trim();
+    if (text) {
+      parts.push('"' + text.substring(0, 24) + '"');
+    } else {
+      const attrs = data.attrs || {};
+      const label = attrs['aria-label'] || attrs.title || attrs['data-testid'] || attrs.name || attrs.alt;
+      if (label) parts.push('[' + String(label).substring(0, 24) + ']');
+      else if (data.stableId) parts.push('#' + data.stableId.substring(0, 24));
+      else if ((data.classes || []).length) parts.push('.' + data.classes[0].substring(0, 24));
+      else parts.push(t('noTextElement'));
+    }
+    return parts.join(' ');
+  }
+
   function renderSteps() {
     stepsContainer.innerHTML = '';
-    
-    steps.forEach((step, index) => {
+
+    steps.forEach((step) => {
       const div = document.createElement('div');
       div.className = 'step';
       div.innerHTML = `
         <div style="font-weight: 600; margin-bottom: 8px;">${t('stepN', {n: step.order})}</div>
-        ${step.elementData ? `
-          <div class="element-preview">${t('elementSelected')}${step.elementData.tagName} ${(step.elementData.textContent || '').substring(0, 30)}</div>
-        ` : ''}
-        <button class="pick-element" data-id="${step.id}" style="background: #FF9800; margin-bottom: 6px; width: 100%;">${t('pickPageElement')}</button>
+        ${step.elementData
+          ? `<div class="element-preview">${t('elementSelected')}${escapeHtml(describeElement(step.elementData))}</div>`
+          : `<div class="element-preview" style="background:#fff3cd;color:#856404;">${t('stepMissingElement')}</div>`}
+        <button class="pick-element" data-id="${escapeHtml(step.id)}" style="background: #FF9800; margin-bottom: 6px; width: 100%;">${t('pickPageElement')}</button>
         <div class="form-row">
           <div class="form-group">
             <label>${t('delayLabel')}</label>
-            <input type="number" class="delay-input" data-id="${step.id}" placeholder="0" value="${step.delay}" min="0" style="margin-bottom: 0;">
+            <input type="number" class="delay-input" data-id="${escapeHtml(step.id)}" placeholder="0" value="${escapeHtml(step.delay)}" min="0" style="margin-bottom: 0;">
           </div>
           <div class="form-group">
             <label>${t('repeatCount')}</label>
-            <input type="number" class="count-input" data-id="${step.id}" placeholder="1" value="${step.count}" min="1" style="margin-bottom: 0;">
+            <input type="number" class="count-input" data-id="${escapeHtml(step.id)}" placeholder="1" value="${escapeHtml(step.count)}" min="1" style="margin-bottom: 0;">
           </div>
         </div>
         <div class="form-row" style="margin-top: 10px;">
           <div class="form-group">
             <label>${t('intervalLabel')}</label>
-            <input type="number" class="interval-input" data-id="${step.id}" placeholder="200" value="${step.interval}" min="0" style="margin-bottom: 0;">
+            <input type="number" class="interval-input" data-id="${escapeHtml(step.id)}" placeholder="200" value="${escapeHtml(step.interval)}" min="0" style="margin-bottom: 0;">
           </div>
         </div>
-        <button class="delete-step" data-id="${step.id}" style="background: #f44336; margin-top: 8px;">${t('deleteStep')}</button>
+        <button class="delete-step" data-id="${escapeHtml(step.id)}" style="background: #f44336; margin-top: 8px;">${t('deleteStep')}</button>
       `;
       stepsContainer.appendChild(div);
     });
     
-    document.querySelectorAll('.pick-element').forEach(btn => {
-      btn.addEventListener('click', () => startElementPicker('step', parseInt(btn.dataset.id)));
+    stepsContainer.querySelectorAll('.pick-element').forEach(btn => {
+      btn.addEventListener('click', () => startElementPicker('step', btn.dataset.id));
     });
-    document.querySelectorAll('.delete-step').forEach(btn => {
-      btn.addEventListener('click', () => removeStep(parseInt(btn.dataset.id)));
+    stepsContainer.querySelectorAll('.delete-step').forEach(btn => {
+      btn.addEventListener('click', () => removeStep(btn.dataset.id));
     });
-    document.querySelectorAll('.delay-input').forEach(input => {
+    stepsContainer.querySelectorAll('.delay-input').forEach(input => {
       input.addEventListener('input', () => {
-        const step = steps.find(s => s.id === parseInt(input.dataset.id));
-        if (step) { step.delay = parseInt(input.value) || 0; saveDraft(); }
+        const step = findStep(input.dataset.id);
+        if (step) { step.delay = Math.max(0, parseInt(input.value) || 0); saveDraft(); }
       });
     });
-    document.querySelectorAll('.count-input').forEach(input => {
+    stepsContainer.querySelectorAll('.count-input').forEach(input => {
       input.addEventListener('input', () => {
-        const step = steps.find(s => s.id === parseInt(input.dataset.id));
-        if (step) { step.count = parseInt(input.value) || 1; saveDraft(); }
+        const step = findStep(input.dataset.id);
+        if (step) { step.count = Math.max(1, parseInt(input.value) || 1); saveDraft(); }
       });
     });
-    document.querySelectorAll('.interval-input').forEach(input => {
+    stepsContainer.querySelectorAll('.interval-input').forEach(input => {
       input.addEventListener('input', () => {
-        const step = steps.find(s => s.id === parseInt(input.dataset.id));
-        if (step) { step.interval = parseInt(input.value) || 200; saveDraft(); }
+        const step = findStep(input.dataset.id);
+        if (step) { step.interval = Math.max(0, parseInt(input.value) || 200); saveDraft(); }
       });
     });
   }
   
   function startElementPicker(type, stepId = null) {
     currentPickerTarget = { type, stepId };
-    
+
     chrome.storage.local.set({
       currentPickerTarget: currentPickerTarget,
       draft: getCurrentDraft()
-    });
-    
-    chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
-      if (!tabs || !tabs[0]) {
-        showStatus(t('openWebpageFirst'), 'error');
-        return;
-      }
-      
-      chrome.tabs.sendMessage(tabs[0].id, {
-        action: 'startPicker',
-        pickerType: type,
-        stepId: stepId
+    }, function() {
+      getActiveTab(function(tab) {
+        sendToTab(tab, {
+          action: 'startPicker',
+          pickerType: type,
+          stepId: stepId
+        }, function() {
+          window.close();
+        });
       });
-      
-      window.close();
     });
   }
   
@@ -337,43 +382,48 @@ document.addEventListener('DOMContentLoaded', function() {
           requireText: false,
           textContent: ''
         };
-        
+
         const triggerMode = result.draft.triggerMode || 'auto';
         const triggerModeRadio = document.querySelector(`input[name="triggerMode"][value="${triggerMode}"]`);
         if (triggerModeRadio) triggerModeRadio.checked = true;
         updateTriggerModeUI();
-        
+
         const autoMode = result.draft.autoMode || 'onLoad';
         const autoModeRadio = document.querySelector(`input[name="autoMode"][value="${autoMode}"]`);
         if (autoModeRadio) autoModeRadio.checked = true;
         loadDelayInput.value = result.draft.loadDelay || 1000;
         pollingIntervalInput.value = result.draft.pollingInterval || 3000;
         updateAutoModeUI();
-        
-        steps = result.draft.steps || [];
-        stepIdCounter = result.draft.stepIdCounter || 0;
-        editingConfigId = result.draft.editingConfigId || null;
-        
-        if (editingConfigId) showEditingMode();
-        
+
+        steps = (result.draft.steps || []).map(s => ({ ...s }));
+        stepIdCounter = result.draft.stepIdCounter || (Math.max(0, ...steps.map(s => Number(s.id) || 0)) + 1);
+        editingConfigId = result.draft.editingConfigId ?? null;
+
+        if (editingConfigId != null) showEditingMode();
+
         applyComboTriggerUI();
       }
-      
+
       if (result.pendingElementData && result.currentPickerTarget) {
-        if (result.currentPickerTarget.type === 'trigger') {
+        const target = result.currentPickerTarget;
+        if (target.type === 'trigger') {
           triggerElementData = result.pendingElementData;
-        } else if (result.currentPickerTarget.type === 'comboElement') {
+        } else if (target.type === 'comboElement') {
           comboTriggerData.elementData = result.pendingElementData;
-        } else if (result.currentPickerTarget.type === 'step') {
-          if (result.draft) applyDraft(result.draft);
-          const step = steps.find(s => s.id === result.currentPickerTarget.stepId);
-          if (step) step.elementData = result.pendingElementData;
+        } else if (target.type === 'step') {
+          const step = steps.find(s => String(s.id) === String(target.stepId));
+          if (step) {
+            step.elementData = result.pendingElementData;
+          } else {
+            // 草稿里已找不到这个步骤（被删掉了），提示而不是静默丢弃
+            showStatus(t('pickedStepMissing'), 'warning');
+          }
         }
         chrome.storage.local.remove(['pendingElementData', 'currentPickerTarget']);
         saveDraft();
         applyComboTriggerUI();
       }
-      
+
       updateTriggerTabs();
       updateTriggerElementPreview();
       renderSteps();
@@ -383,7 +433,7 @@ document.addEventListener('DOMContentLoaded', function() {
   function updateTriggerElementPreview() {
     if (triggerElementData) {
       triggerElementPreview.classList.remove('hidden');
-      triggerElementPreview.textContent = t('triggerElementSelected') + triggerElementData.tagName + ' ' + (triggerElementData.textContent || '').substring(0, 30);
+      triggerElementPreview.textContent = t('triggerElementSelected') + describeElement(triggerElementData);
     } else {
       triggerElementPreview.classList.add('hidden');
     }
@@ -392,59 +442,31 @@ document.addEventListener('DOMContentLoaded', function() {
   function updateComboElementPreview() {
     if (comboTriggerData.elementData) {
       comboElementPreview.classList.remove('hidden');
-      comboElementPreview.textContent = t('triggerElementSelected') + comboTriggerData.elementData.tagName + ' ' + (comboTriggerData.elementData.textContent || '').substring(0, 30);
+      comboElementPreview.textContent = t('triggerElementSelected') + describeElement(comboTriggerData.elementData);
     } else {
       comboElementPreview.classList.add('hidden');
     }
   }
-  
+
   function applyComboTriggerUI() {
-    comboRequireWebsite.checked = comboTriggerData.requireWebsite;
-    comboWebsiteUrl.value = comboTriggerData.websiteUrl;
+    comboRequireWebsite.checked = !!comboTriggerData.requireWebsite;
+    comboWebsiteUrl.value = comboTriggerData.websiteUrl || '';
     comboWebsiteUrl.classList.toggle('hidden', !comboTriggerData.requireWebsite);
-    
-    comboRequireElement.checked = comboTriggerData.requireElement;
+
+    comboRequireElement.checked = !!comboTriggerData.requireElement;
     comboPickElement.classList.toggle('hidden', !comboTriggerData.requireElement);
     updateComboElementPreview();
-    
-    comboRequireText.checked = comboTriggerData.requireText;
-    comboTextContent.value = comboTriggerData.textContent;
+
+    comboRequireText.checked = !!comboTriggerData.requireText;
+    comboTextContent.value = comboTriggerData.textContent || '';
     comboTextContent.classList.toggle('hidden', !comboTriggerData.requireText);
-  }
-  
-  function applyDraft(draft) {
-    if (draft.configName) configNameInput.value = draft.configName;
-    if (draft.triggerType) triggerType = draft.triggerType;
-    if (draft.websiteUrl) websiteUrlInput.value = draft.websiteUrl;
-    if (draft.triggerElement) triggerElementData = draft.triggerElement;
-    if (draft.triggerText) triggerTextContentInput.value = draft.triggerText;
-    if (draft.comboTrigger) comboTriggerData = draft.comboTrigger;
-    
-    if (draft.triggerMode) {
-      const triggerModeRadio = document.querySelector(`input[name="triggerMode"][value="${draft.triggerMode}"]`);
-      if (triggerModeRadio) triggerModeRadio.checked = true;
-    }
-    updateTriggerModeUI();
-    
-    if (draft.autoMode) {
-      const autoModeRadio = document.querySelector(`input[name="autoMode"][value="${draft.autoMode}"]`);
-      if (autoModeRadio) autoModeRadio.checked = true;
-    }
-    if (draft.loadDelay) loadDelayInput.value = draft.loadDelay;
-    if (draft.pollingInterval) pollingIntervalInput.value = draft.pollingInterval;
-    updateAutoModeUI();
-    
-    if (draft.steps) steps = draft.steps;
-    if (draft.stepIdCounter) stepIdCounter = draft.stepIdCounter;
-    if (draft.editingConfigId) editingConfigId = draft.editingConfigId;
   }
   
   function showEditingMode() {
     editingModeDiv.classList.remove('hidden');
-    if (editingConfigId) {
-      const config = allConfigs.find(c => c.id === editingConfigId);
-      if (config) editingConfigNameSpan.textContent = config.name;
-    }
+    // allConfigs 可能还没加载完（与 loadDraft 并行），退回用输入框里的名字
+    const config = findConfigById(allConfigs, editingConfigId);
+    editingConfigNameSpan.textContent = config?.name || configNameInput.value || '';
   }
   
   function hideEditingMode() {
@@ -461,66 +483,109 @@ document.addEventListener('DOMContentLoaded', function() {
     renderConfigList();
   }
   
+  // 保存前校验，拦掉「一定不会生效」或「会到处乱点」的配置
+  function validateConfig(draft) {
+    if (!draft.name) return t('enterConfigName');
+    if (!draft.steps || draft.steps.length === 0) return t('addAtLeastOneStep');
+
+    if (draft.steps.some(s => !s.elementData)) {
+      return t('stepMissingElement');
+    }
+
+    if (draft.triggerType === 'website' && !draft.websiteUrl.trim()) {
+      return t('websiteUrlRequired');
+    }
+    if (draft.triggerType === 'element' && !draft.triggerElement) {
+      return t('triggerElementRequired');
+    }
+    if (draft.triggerType === 'text' && !draft.triggerText.trim()) {
+      return t('triggerTextRequired');
+    }
+    if (draft.triggerType === 'combo') {
+      const combo = draft.comboTrigger || {};
+      if (!combo.requireWebsite && !combo.requireElement && !combo.requireText) {
+        return t('comboNeedsCondition');
+      }
+      if (combo.requireWebsite && !(combo.websiteUrl || '').trim()) {
+        return t('websiteUrlRequired');
+      }
+      if (combo.requireElement && !combo.elementData) {
+        return t('triggerElementRequired');
+      }
+      if (combo.requireText && !(combo.textContent || '').trim()) {
+        return t('triggerTextRequired');
+      }
+    }
+
+    return null;
+  }
+
+  function buildConfigPayload(name) {
+    return {
+      name: name,
+      triggerType: triggerType,
+      websiteUrl: websiteUrlInput.value.trim(),
+      triggerElement: triggerElementData,
+      triggerText: triggerTextContentInput.value.trim(),
+      comboTrigger: comboTriggerData,
+      triggerMode: document.querySelector('input[name="triggerMode"]:checked').value,
+      autoMode: document.querySelector('input[name="autoMode"]:checked').value,
+      loadDelay: parseInt(loadDelayInput.value) || 0,
+      pollingInterval: Math.max(200, parseInt(pollingIntervalInput.value) || 3000),
+      steps: steps
+    };
+  }
+
   function saveOrUpdateConfig() {
     const name = configNameInput.value.trim();
-    if (!name) {
-      showStatus(t('enterConfigName'), 'error');
+    const payload = buildConfigPayload(name);
+
+    const error = validateConfig(payload);
+    if (error) {
+      showStatus(error, 'error');
       return;
     }
-    
-    if (steps.length === 0) {
-      showStatus(t('addAtLeastOneStep'), 'error');
-      return;
-    }
-    
+
     chrome.storage.local.get(['configs'], function(result) {
       allConfigs = result.configs || [];
-      
-      if (editingConfigId) {
-        const index = allConfigs.findIndex(c => c.id === editingConfigId);
-        if (index !== -1) {
-          const configData = {
-            id: editingConfigId,
-            name: name,
-            triggerType: triggerType,
-            websiteUrl: websiteUrlInput.value,
-            triggerElement: triggerElementData,
-            triggerText: triggerTextContentInput.value,
-            comboTrigger: comboTriggerData,
-            triggerMode: document.querySelector('input[name="triggerMode"]:checked').value,
-            autoMode: document.querySelector('input[name="autoMode"]:checked').value,
-            loadDelay: parseInt(loadDelayInput.value) || 0,
-            pollingInterval: parseInt(pollingIntervalInput.value) || 3000,
-            steps: steps,
-            paused: allConfigs[index].paused || false,
-            createdAt: allConfigs[index].createdAt,
-            updatedAt: Date.now()
-          };
-          allConfigs[index] = configData;
-        }
+
+      // id 可能是 number 也可能是 string（导入的配置），统一按字符串比
+      const index = editingConfigId != null
+        ? allConfigs.findIndex(c => String(c.id) === String(editingConfigId))
+        : -1;
+
+      const isUpdate = index !== -1;
+
+      if (editingConfigId != null && !isUpdate) {
+        // 正在编辑的配置已不存在（被删掉 / 被其他窗口改过）：
+        // 不能静默丢弃用户的编辑，转为新建保存
+        showStatus(t('editTargetMissing'), 'warning');
+      }
+
+      if (isUpdate) {
+        allConfigs[index] = {
+          ...payload,
+          id: allConfigs[index].id,
+          paused: allConfigs[index].paused || false,
+          createdAt: allConfigs[index].createdAt || Date.now(),
+          updatedAt: Date.now()
+        };
       } else {
-        const configData = {
+        allConfigs.unshift({
+          ...payload,
           id: Date.now(),
-          name: name,
-          triggerType: triggerType,
-          websiteUrl: websiteUrlInput.value,
-          triggerElement: triggerElementData,
-          triggerText: triggerTextContentInput.value,
-          comboTrigger: comboTriggerData,
-          triggerMode: document.querySelector('input[name="triggerMode"]:checked').value,
-          autoMode: document.querySelector('input[name="autoMode"]:checked').value,
-          loadDelay: parseInt(loadDelayInput.value) || 0,
-          pollingInterval: parseInt(pollingIntervalInput.value) || 3000,
-          steps: steps,
           paused: false,
           createdAt: Date.now(),
           updatedAt: Date.now()
-        };
-        allConfigs.unshift(configData);
+        });
       }
-      
+
       chrome.storage.local.set({ configs: allConfigs }, function() {
-        showStatus(editingConfigId ? t('configUpdated') : t('configSaved'), 'success');
+        if (chrome.runtime.lastError) {
+          showStatus(t('saveFailed') + chrome.runtime.lastError.message, 'error');
+          return;
+        }
+        showStatus(isUpdate ? t('configUpdated') : t('configSaved'), 'success');
         clearDraft();
         loadConfigs();
       });
@@ -528,17 +593,24 @@ document.addEventListener('DOMContentLoaded', function() {
   }
   
   function testCurrentDraft() {
-    chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
-      if (!tabs || !tabs[0]) {
-        showStatus(t('openWebpageFirst'), 'error');
-        return;
-      }
-      
-      const draft = getCurrentDraft();
-      
-      chrome.storage.local.set({ testConfig: draft }, function() {
-        chrome.tabs.sendMessage(tabs[0].id, { action: 'test', config: draft });
-        window.close();
+    const draft = getCurrentDraft();
+
+    if (!draft.steps || draft.steps.length === 0) {
+      showStatus(t('addAtLeastOneStep'), 'error');
+      return;
+    }
+    if (draft.steps.some(s => !s.elementData)) {
+      showStatus(t('stepMissingElement'), 'error');
+      return;
+    }
+
+    getActiveTab(function(tab) {
+      // 测试时把草稿名补上，content script 日志里能对上号
+      const testConfig = { ...draft, name: draft.configName || t('testBtn'), id: 'draft' };
+      chrome.storage.local.set({ testConfig: testConfig }, function() {
+        sendToTab(tab, { action: 'test', config: testConfig }, function() {
+          window.close();
+        });
       });
     });
   }
@@ -557,69 +629,97 @@ document.addEventListener('DOMContentLoaded', function() {
     });
   }
   
+  function escapeHtml(str) {
+    return String(str ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
   function renderConfigList() {
     if (!allConfigs || allConfigs.length === 0) {
       configListDiv.innerHTML = `<div style="text-align: center; color: #666; padding: 20px;">${t('noSavedConfigs')}</div>`;
       return;
     }
-    
+
     let filteredConfigs = allConfigs;
     if (searchQuery) {
-      filteredConfigs = allConfigs.filter(c => 
-        c.name.toLowerCase().includes(searchQuery)
+      filteredConfigs = allConfigs.filter(c =>
+        (c.name || '').toLowerCase().includes(searchQuery)
       );
     }
-    
+
     const triggerTypeMap = {
       website: 'triggerTypeWebsite',
       element: 'triggerTypeElement',
       text: 'triggerTypeText',
       combo: 'triggerTypeCombo'
     };
-    
+
+    const autoModeMap = {
+      onLoad: 'modeTagOnLoad',
+      polling: 'modeTagPolling',
+      observer: 'modeTagObserver'
+    };
+
     configListDiv.innerHTML = filteredConfigs.map(config => {
       const triggerTypeText = t(triggerTypeMap[config.triggerType] || 'triggerTypeWebsite');
       const statusIcon = config.paused ? t('statusPaused') : (config.triggerMode === 'manual' ? t('statusManual') : t('statusActive'));
-      
+      const modeText = (config.triggerMode || 'auto') === 'manual'
+        ? ''
+        : ' | ' + t(autoModeMap[config.autoMode || 'onLoad']);
+      const id = escapeHtml(config.id);
+
       return `
-        <div class="config-item" data-id="${config.id}">
+        <div class="config-item" data-id="${id}">
           <div class="config-item-header">
-            <div class="config-item-name">${config.name}</div>
-            <div class="config-item-meta">${triggerTypeText} | ${statusIcon}</div>
+            <div class="config-item-name">${escapeHtml(config.name)}</div>
+            <div class="config-item-meta">${triggerTypeText}${modeText} | ${statusIcon}</div>
           </div>
           <div class="config-item-actions">
-            <button class="config-action-btn edit-config" data-id="${config.id}" title="${t('tipEdit')}">✏️</button>
-            <button class="config-action-btn toggle-config-pause" data-id="${config.id}" title="${config.paused ? t('tipEnable') : t('tipPause')}">${config.paused ? '🔛' : '⏸️'}</button>
-            <button class="config-action-btn run-config" data-id="${config.id}" title="${t('tipRun')}">▶️</button>
-            <button class="config-action-btn delete-config" data-id="${config.id}" title="${t('tipDelete')}">🗑️</button>
+            <button class="config-action-btn edit-config" data-id="${id}" title="${t('tipEdit')}">✏️</button>
+            <button class="config-action-btn toggle-config-pause" data-id="${id}" title="${config.paused ? t('tipEnable') : t('tipPause')}">${config.paused ? '🔛' : '⏸️'}</button>
+            <button class="config-action-btn run-config" data-id="${id}" title="${t('tipRun')}">▶️</button>
+            <button class="config-action-btn delete-config" data-id="${id}" title="${t('tipDelete')}">🗑️</button>
           </div>
         </div>
       `;
     }).join('');
-    
+
+    // id 统一按字符串传递，避免 parseInt 把导入配置的字符串 id 变成 NaN
     configListDiv.querySelectorAll('.edit-config').forEach(btn => {
-      btn.addEventListener('click', () => loadConfigToEdit(parseInt(btn.dataset.id)));
+      btn.addEventListener('click', () => loadConfigToEdit(btn.dataset.id));
     });
     configListDiv.querySelectorAll('.toggle-config-pause').forEach(btn => {
-      btn.addEventListener('click', () => toggleConfigPause(parseInt(btn.dataset.id)));
+      btn.addEventListener('click', () => toggleConfigPause(btn.dataset.id));
     });
     configListDiv.querySelectorAll('.run-config').forEach(btn => {
-      btn.addEventListener('click', () => runConfig(parseInt(btn.dataset.id)));
+      btn.addEventListener('click', () => runConfig(btn.dataset.id));
     });
     configListDiv.querySelectorAll('.delete-config').forEach(btn => {
-      btn.addEventListener('click', () => deleteConfig(parseInt(btn.dataset.id)));
+      btn.addEventListener('click', () => deleteConfig(btn.dataset.id));
     });
   }
-  
+
+  function findConfigById(configs, configId) {
+    return (configs || []).find(c => String(c.id) === String(configId));
+  }
+
   function loadConfigToEdit(configId) {
-    const config = allConfigs.find(c => c.id === configId);
-    if (!config) return;
-    
-    configNameInput.value = config.name;
-    triggerType = config.triggerType;
-    websiteUrlInput.value = config.websiteUrl;
-    triggerElementData = config.triggerElement;
-    triggerTextContentInput.value = config.triggerText;
+    const config = findConfigById(allConfigs, configId);
+    if (!config) {
+      showStatus(t('editTargetMissing'), 'error');
+      loadConfigs();
+      return;
+    }
+
+    configNameInput.value = config.name || '';
+    triggerType = config.triggerType || 'website';
+    websiteUrlInput.value = config.websiteUrl || '';
+    triggerElementData = config.triggerElement || null;
+    triggerTextContentInput.value = config.triggerText || '';
     comboTriggerData = config.comboTrigger || {
       requireWebsite: false,
       websiteUrl: '',
@@ -628,63 +728,66 @@ document.addEventListener('DOMContentLoaded', function() {
       requireText: false,
       textContent: ''
     };
-    
+
     const triggerMode = config.triggerMode || 'auto';
     const triggerModeRadio = document.querySelector(`input[name="triggerMode"][value="${triggerMode}"]`);
     if (triggerModeRadio) triggerModeRadio.checked = true;
     updateTriggerModeUI();
-    
+
     const autoMode = config.autoMode || 'onLoad';
     const autoModeRadio = document.querySelector(`input[name="autoMode"][value="${autoMode}"]`);
     if (autoModeRadio) autoModeRadio.checked = true;
     loadDelayInput.value = config.loadDelay || 1000;
     pollingIntervalInput.value = config.pollingInterval || 3000;
     updateAutoModeUI();
-    
-    steps = config.steps || [];
-    stepIdCounter = Math.max(...steps.map(s => s.id || 0), 0) + 1;
-    editingConfigId = configId;
-    
+
+    steps = (config.steps || []).map(s => ({ ...s }));
+    stepIdCounter = Math.max(0, ...steps.map(s => Number(s.id) || 0)) + 1;
+    editingConfigId = config.id;
+
     updateTriggerTabs();
     applyComboTriggerUI();
     showEditingMode();
     updateTriggerElementPreview();
-    
+
     renderSteps();
     saveDraft();
     listContainer.classList.add('hidden');
   }
-  
+
   function toggleConfigPause(configId) {
     chrome.storage.local.get(['configs'], function(result) {
       allConfigs = result.configs || [];
-      const config = allConfigs.find(c => c.id === configId);
-      if (config) {
-        config.paused = !config.paused;
-        config.updatedAt = Date.now();
-        chrome.storage.local.set({ configs: allConfigs }, function() {
-          renderConfigList();
-          showStatus(config.paused ? t('configPaused') : t('configEnabled'), 'success');
-        });
+      const config = findConfigById(allConfigs, configId);
+      if (!config) {
+        showStatus(t('editTargetMissing'), 'error');
+        loadConfigs();
+        return;
       }
+      config.paused = !config.paused;
+      config.updatedAt = Date.now();
+      chrome.storage.local.set({ configs: allConfigs }, function() {
+        renderConfigList();
+        showStatus(config.paused ? t('configPaused') : t('configEnabled'), 'success');
+      });
     });
   }
-  
+
   function runConfig(configId) {
     chrome.storage.local.get(['configs'], function(result) {
       allConfigs = result.configs || [];
-      const config = allConfigs.find(c => c.id === configId);
-      if (!config) return;
-      
-      chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
-        if (!tabs || !tabs[0]) {
-          showStatus(t('openWebpageFirst'), 'error');
-          return;
-        }
-        
+      const config = findConfigById(allConfigs, configId);
+      if (!config) {
+        showStatus(t('editTargetMissing'), 'error');
+        loadConfigs();
+        return;
+      }
+
+      getActiveTab(function(tab) {
         chrome.storage.local.set({ testConfig: config }, function() {
-          chrome.tabs.sendMessage(tabs[0].id, { action: 'test', config: config });
-          window.close();
+          sendToTab(tab, { action: 'test', config: config }, function() {
+            window.close();
+          });
         });
       });
     });
@@ -692,10 +795,18 @@ document.addEventListener('DOMContentLoaded', function() {
   
   function deleteConfig(configId) {
     if (!confirm(t('confirmDelete'))) return;
-    
+
     chrome.storage.local.get(['configs'], function(result) {
-      allConfigs = result.configs || [];
-      allConfigs = allConfigs.filter(c => c.id !== configId);
+      const configs = result.configs || [];
+      allConfigs = configs.filter(c => String(c.id) !== String(configId));
+
+      // 正在编辑的配置被删掉了，退出编辑态，避免保存时把它「复活」
+      if (editingConfigId != null && String(editingConfigId) === String(configId)) {
+        editingConfigId = null;
+        hideEditingMode();
+        saveDraft();
+      }
+
       chrome.storage.local.set({ configs: allConfigs }, function() {
         showStatus(t('configDeleted'), 'success');
         loadConfigs();
@@ -773,7 +884,7 @@ document.addEventListener('DOMContentLoaded', function() {
         <label class="picker-item">
           <input type="checkbox" class="picker-checkbox" data-idx="${idx}" checked>
           <div class="picker-item-info">
-            <div class="picker-item-name">${config.name}</div>
+            <div class="picker-item-name">${escapeHtml(config.name)}</div>
             <div class="picker-item-meta">${typeText} · ${stepsCount} ${t('stepsLabel').toLowerCase()}</div>
           </div>
         </label>
@@ -839,10 +950,51 @@ document.addEventListener('DOMContentLoaded', function() {
     });
   }
   
+  // 导入的配置可能来自旧版本或手工编辑，逐字段规整，避免存进去后运行时报错
+  function normalizeImportedConfig(config, newId) {
+    const steps = (config.steps || []).map((step, i) => ({
+      id: Number.isFinite(Number(step.id)) ? Number(step.id) : i,
+      type: 'click',
+      elementData: step.elementData || null,
+      delay: Math.max(0, parseInt(step.delay) || 0),
+      count: Math.max(1, parseInt(step.count) || 1),
+      interval: Math.max(0, parseInt(step.interval) || 200),
+      order: i + 1
+    }));
+
+    const validTriggerTypes = ['website', 'element', 'text', 'combo'];
+    const validAutoModes = ['onLoad', 'polling', 'observer'];
+
+    return {
+      id: newId,
+      name: String(config.name).slice(0, 200),
+      triggerType: validTriggerTypes.includes(config.triggerType) ? config.triggerType : 'website',
+      websiteUrl: String(config.websiteUrl || '').trim(),
+      triggerElement: config.triggerElement || null,
+      triggerText: String(config.triggerText || '').trim(),
+      comboTrigger: config.comboTrigger || {
+        requireWebsite: false,
+        websiteUrl: '',
+        requireElement: false,
+        elementData: null,
+        requireText: false,
+        textContent: ''
+      },
+      triggerMode: config.triggerMode === 'manual' ? 'manual' : 'auto',
+      autoMode: validAutoModes.includes(config.autoMode) ? config.autoMode : 'onLoad',
+      loadDelay: Math.max(0, parseInt(config.loadDelay) || 1000),
+      pollingInterval: Math.max(200, parseInt(config.pollingInterval) || 3000),
+      steps: steps,
+      paused: !!config.paused,
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    };
+  }
+
   function importConfigs(event) {
     const file = event.target.files[0];
     if (!file) return;
-    
+
     const reader = new FileReader();
     reader.onload = function(e) {
       try {
@@ -850,35 +1002,35 @@ document.addEventListener('DOMContentLoaded', function() {
         if (!Array.isArray(importedConfigs)) {
           throw new Error(t('invalidFormat'));
         }
-        
-        const validConfigs = importedConfigs.filter(c => c.name && c.steps);
+
+        const validConfigs = importedConfigs.filter(c =>
+          c && typeof c === 'object' && c.name && Array.isArray(c.steps) && c.steps.length > 0
+        );
         if (validConfigs.length === 0) {
           showStatus(t('invalidFormat'), 'error');
           return;
         }
-        
+
         showConfigPicker(validConfigs, 'selectConfigsToImport', 'confirmImport', function(selected) {
           chrome.storage.local.get(['configs'], function(result) {
-            let allConfigs = result.configs || [];
-            const existingIds = new Set(allConfigs.map(c => c.id));
-            
+            const existing = result.configs || [];
+            // id 可能是数字也可能是字符串，统一按字符串判重
+            const existingIds = new Set(existing.map(c => String(c.id)));
+
             selected.forEach(config => {
-              let newId = Date.now() + Math.floor(Math.random() * 1000);
-              while (existingIds.has(newId)) {
-                newId = Date.now() + Math.floor(Math.random() * 1000);
+              let newId = Date.now() + Math.floor(Math.random() * 100000);
+              while (existingIds.has(String(newId))) {
+                newId++;
               }
-              const newConfig = {
-                ...config,
-                id: newId,
-                paused: config.paused || false,
-                createdAt: Date.now(),
-                updatedAt: Date.now()
-              };
-              allConfigs.unshift(newConfig);
-              existingIds.add(newId);
+              existing.unshift(normalizeImportedConfig(config, newId));
+              existingIds.add(String(newId));
             });
-            
-            chrome.storage.local.set({ configs: allConfigs }, function() {
+
+            chrome.storage.local.set({ configs: existing }, function() {
+              if (chrome.runtime.lastError) {
+                showStatus(t('saveFailed') + chrome.runtime.lastError.message, 'error');
+                return;
+              }
               showStatus(t('importSuccess', {n: selected.length}), 'success');
               loadConfigs();
             });

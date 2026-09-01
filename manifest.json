@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Auto Clicker Pro",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "description": "Auto-click page elements with multiple trigger types, flexible run modes, and config management. 自动点击页面元素，支持多种触发方式和配置管理。",
   "permissions": [
     "storage",
@@ -20,7 +20,9 @@
       "matches": ["<all_urls>"],
       "js": ["content.js"],
       "css": ["content.css"],
-      "run_at": "document_idle"
+      "run_at": "document_idle",
+      "all_frames": true,
+      "match_about_blank": true
     }
   ],
   "action": {

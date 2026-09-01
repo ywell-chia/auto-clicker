@@ -382,8 +382,8 @@
     </div>
     
     <div id="triggerWebsite">
-      <label data-i18n="websiteUrlLabel">网站地址（包含就触发）</label>
-      <input type="text" id="websiteUrl" data-i18n-placeholder="websiteUrlPlaceholder" placeholder="例如：baidu.com">
+      <label data-i18n="websiteUrlLabel">网站地址（包含即匹配，支持 * 通配）</label>
+      <input type="text" id="websiteUrl" data-i18n-placeholder="websiteUrlPlaceholder" placeholder="例如：baidu.com 或 *.baidu.com/s*">
     </div>
     
     <div id="triggerElement" class="hidden">
@@ -429,7 +429,7 @@
     
     <div id="autoTriggerOptions" style="margin-top: 12px;">
       <label class="checkbox-label">
-        <input type="radio" name="autoMode" value="onLoad" checked> <span data-i18n="autoModeOnLoad">页面加载完成后触发（仅一次）</span>
+        <input type="radio" name="autoMode" value="onLoad" checked> <span data-i18n="autoModeOnLoad">页面加载后触发（持续等待条件出现）</span>
       </label>
       <div class="form-row" id="loadDelayRow" style="margin-left: 24px; margin-top: 4px; margin-bottom: 8px;">
         <div class="form-group">
@@ -443,7 +443,7 @@
       <div class="form-row" id="pollingIntervalRow" style="display: none; margin-left: 24px; margin-top: 4px; margin-bottom: 8px;">
         <div class="form-group">
           <label data-i18n="pollingInterval">轮询间隔（毫秒）</label>
-          <input type="number" id="pollingInterval" placeholder="3000" value="3000" min="1000" style="margin-bottom: 0;">
+          <input type="number" id="pollingInterval" placeholder="3000" value="3000" min="200" style="margin-bottom: 0;">
         </div>
       </div>
       <label class="checkbox-label">

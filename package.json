@@ -1,0 +1,12 @@
+{
+  "name": "auto-clicker-pro",
+  "version": "3.2.0",
+  "private": true,
+  "description": "Auto Clicker Pro Chrome extension",
+  "scripts": {
+    "test": "node test-content.js && node test-runtime.js && node test-popup.js"
+  },
+  "devDependencies": {
+    "jsdom": "^29.1.1"
+  }
+}
