@@ -5,6 +5,11 @@
   cursor: crosshair !important;
 }
 
+.auto-clicker-picking,
+.auto-clicker-picking * {
+  cursor: crosshair !important;
+}
+
 .auto-clicker-picker-overlay {
   position: fixed !important;
   top: 0 !important;
